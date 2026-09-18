@@ -60,6 +60,10 @@ class StateManager:
         self.historical_seen_ids: set[str] = set()
         self.historical_covered_chapters: set[str] = set()
         self.last_papers_qids: list[list[str]] = []  # 上次生成的试卷（每份卷一个题号列表）
+        # 错题轮换账本：本轮已重练过的错题。与 historical_seen_ids 必须分开——
+        # seen 只增不减，且标错页手动标的错题根本不进 seen（不走 record_paper_generation），
+        # 拿 seen 当轮换依据会乱。本集合在"活跃错题全部练过一遍"时自动清空，开启新一轮。
+        self.wrong_rotation_ids: set[str] = set()
         self.load_state()
 
     @staticmethod
@@ -78,6 +82,7 @@ class StateManager:
         self.wrong_questions = {}
         self.historical_seen_ids = set()
         self.historical_covered_chapters = set()
+        self.wrong_rotation_ids = set()
         self.load_state()
 
     def get_all_profiles(self) -> list[str]:
@@ -114,6 +119,7 @@ class StateManager:
             self.historical_seen_ids = set(payload.get("seen_question_ids", []))
             self.historical_covered_chapters = set(payload.get("covered_chapters", []))
             self.last_papers_qids = payload.get("last_papers_qids", []) or []
+            self.wrong_rotation_ids = set(payload.get("wrong_rotation_ids", []))
         except Exception:
             pass
 
@@ -129,6 +135,7 @@ class StateManager:
                 "seen_question_ids": list(self.historical_seen_ids),
                 "covered_chapters": list(self.historical_covered_chapters),
                 "last_papers_qids": self.last_papers_qids,
+                "wrong_rotation_ids": list(self.wrong_rotation_ids),
             }
             self.data_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
@@ -290,6 +297,37 @@ class StateManager:
         for q in questions:
             self.historical_seen_ids.add(q.id)
             self.historical_covered_chapters.add(q.chapter)
+        self.save_state()
+
+    def record_wrong_practice(self, question_ids: list[str] | set[str]) -> bool:
+        """记录本轮已重练的错题；活跃错题全部练过一遍即清空账本、开启新一轮。
+
+        返回 True 表示本次触发了轮次重置。只登记确实属于错题本的题号，避免新题混进账本。
+        """
+        newly = {qid for qid in question_ids if qid in self.wrong_questions}
+        if newly:
+            self.wrong_rotation_ids |= newly
+
+        # 轮次结束判定：当前所有活跃错题都已在账本里 → 清空重开。
+        # 用 issubset 而非等值比较：账本里可能残留已被取消标记的旧题号，不该阻碍轮次结束。
+        active = self.get_active_wrong_question_ids()
+        did_reset = bool(active) and active.issubset(self.wrong_rotation_ids)
+        if did_reset:
+            self.wrong_rotation_ids = set()
+
+        if newly or did_reset:
+            self.save_state()
+        return did_reset
+
+    def get_wrong_counts(self, question_ids: set[str] | None = None) -> dict[str, int]:
+        """返回 {题号: 做错次数}，供组卷按错误次数加权。默认取全部错题。"""
+        if question_ids is None:
+            return {qid: rec.wrong_count for qid, rec in self.wrong_questions.items()}
+        return {qid: self.get_wrong_count(qid) for qid in question_ids}
+
+    def reset_wrong_rotation(self) -> None:
+        """手动清空错题轮换账本（开启新一轮重练）。"""
+        self.wrong_rotation_ids = set()
         self.save_state()
 
     def set_last_papers(self, papers_qids: list[list[str]]) -> None:
@@ -483,6 +521,55 @@ class StateManager:
         if not restored:
             return (0, "empty")
         self.historical_seen_ids |= restored  # 合并,不覆盖
+        self.save_state()
+        return (len(restored), "ok")
+
+    # =====================================================================
+    # 错题轮换账本的 URL 编码：与 seen 位图同构（1 bit/题），但用独立参数
+    # r1/r2/r3(880) · zr1/zr2/zr3(真题) · tr1/tr2/tr3(1000题)，各自锚定本书 canonical。
+    # 旧链接没有这些参数 → 账本为空 → 行为等同"新一轮开始"，向后兼容。
+    # =====================================================================
+    ROTATION_CODE_PREFIX = "r1"
+
+    def rotation_to_url_code(self, ordered_ids: list[str]) -> str:
+        """将"本轮已重练错题"编码为可放进 URL 的紧凑串(1 bit/题)"""
+        n = len(ordered_ids)
+        packed = bytearray((n + 7) // 8)
+        for i, qid in enumerate(ordered_ids):
+            if qid in self.wrong_rotation_ids:
+                packed[i >> 3] |= 1 << (i & 7)
+        compressed = zlib.compress(bytes(packed), 9)
+        b64 = base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
+        return f"{self.ROTATION_CODE_PREFIX}~{self.bank_signature(ordered_ids)}~{b64}"
+
+    def apply_rotation_url_code(self, code: str, ordered_ids: list[str]) -> tuple[int, str]:
+        """从 URL 串恢复"本轮已重练错题"并**合并**进本地账本。返回 (恢复条数, 状态)。
+
+        与 seen 同为累积并集：手机练过 5 道、电脑接着练，两边进度汇总而非互相冲掉。
+        """
+        try:
+            parts = code.split("~")
+            if len(parts) != 3 or parts[0] != self.ROTATION_CODE_PREFIX:
+                return (0, "invalid")
+            _, sig, b64 = parts
+            if sig != self.bank_signature(ordered_ids):
+                return (0, "stale")
+            pad = "=" * (-len(b64) % 4)
+            packed = zlib.decompress(base64.urlsafe_b64decode(b64 + pad))
+        except Exception:
+            return (0, "invalid")
+
+        restored: set[str] = set()
+        for i, qid in enumerate(ordered_ids):
+            byte_i = i >> 3
+            if byte_i >= len(packed):
+                break
+            if (packed[byte_i] >> (i & 7)) & 1:
+                restored.add(qid)
+
+        if not restored:
+            return (0, "empty")
+        self.wrong_rotation_ids |= restored
         self.save_state()
         return (len(restored), "ok")
 

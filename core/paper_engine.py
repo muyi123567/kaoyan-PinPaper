@@ -49,9 +49,16 @@ class EngineRequest:
     # 任一侧不足时由另一侧自动补齐。ratio<=0 或池为空 → 退化为普通全书抽题。
     priority_pool_ids: set[str] = field(default_factory=set)
     priority_ratio: float = 0.0
-    # 是否排除"已抽过的新题"(seen)。仅作用于新题池，错题优先池不受影响；
-    # 过滤后新题不足时软重置(回退完整新题池)。见 historical_seen_question_ids。
+    # 是否排除"已抽过的新题"(seen)。作用于新题池；错题池走 priority_practiced_ids 轮换，
+    # 不吃这个集合(错题必须能重练)。过滤后新题不足时软重置(回退完整新题池)。
     exclude_seen: bool = True
+    # 错题轮换：本轮已重练过的错题。抽错题时优先挑不在此集合里的，
+    # 剔完为空则软重置(回退完整错题池)，保证每道错题一轮内都能轮到，
+    # 而不是分数相近就反复抽中同几道。账本由 StateManager.wrong_rotation_ids 维护。
+    priority_practiced_ids: set[str] = field(default_factory=set)
+    # 错题按做错次数加权：{题号: 做错次数}。错得越多抽中概率越高（在轮换筛选之后生效，
+    # 故"轮换打底 + 次数加权排序"二者兼顾）。缺省视为 1 次。
+    priority_wrong_counts: dict[str, int] = field(default_factory=dict)
     # 真题章节分布软权重:{题型: {章名: 权重}}。抽题打分时乘上当前题(题型+章)的权重,
     # 缺省 1.0(不影响)。真题里考得多的章权重>1 → 880 组卷更易抽中。空 dict = 不启用。
     chapter_weights: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -409,6 +416,16 @@ class PaperEngine:
         globally_covered_chapters: set[str] = set()
         alphabet = ["A", "B", "C", "D", "E"]
 
+        # 联考此前只用了 seed/difficulty/chapter_weights，把错题池、错题占比、seen 全丢了。
+        # 这里统一取出，语义与单卷模式(_pick_priority_then_fill)保持一致。
+        bundle_ratio = max(0.0, min(1.0, request.priority_ratio))
+        bundle_pri_ids = request.priority_pool_ids
+        bundle_practiced = request.priority_practiced_ids
+        bundle_seen = request.historical_seen_question_ids if request.exclude_seen else set()
+        bundle_wrong_w = {
+            qid: max(1.0, float(cnt)) for qid, cnt in request.priority_wrong_counts.items()
+        } or None
+
         standard_slots = get_standard_slots(request.subject, PaperMode.FULL_10_6_6, request.enabled_categories)
 
         for idx in range(bundle_size):
@@ -428,8 +445,9 @@ class PaperEngine:
                 cat_assigned = cat_buckets.get(cat, [set()]*bundle_size)[idx]
                 uncovered_in_cat = set(cat_to_chapters.get(cat, [])) - globally_covered_chapters
 
+                source_pool = request.candidate_question_pool or self.all_questions
                 cat_pool = [
-                    q for q in self.all_questions
+                    q for q in source_pool
                     if q.question_type == qtype
                     and q.category == cat
                     and q.chapter in target_chapters
@@ -437,6 +455,35 @@ class PaperEngine:
                 ]
 
                 chosen_for_group: list[QuestionItem] = []
+
+                # 错题优先：与单卷模式一致，先按 priority_ratio 从错题池抽(轮换 + 次数加权)。
+                # 此前联考完全无视 priority_pool_ids/priority_ratio，错题占比拉满也几乎不出错题。
+                want_pri = int(round(needed * bundle_ratio))
+                if want_pri > 0 and bundle_pri_ids:
+                    pri_full = [q for q in cat_pool if q.id in bundle_pri_ids]
+                    pri_rot = [q for q in pri_full if q.id not in bundle_practiced] or pri_full
+                    picked = self._pick_from_pool(
+                        pri_rot, want_pri, request, uncovered_in_cat, chapter_usage,
+                        covered_knowledge, globally_selected_ids, sub_rng,
+                        extra_weights=bundle_wrong_w,
+                    )
+                    if len(picked) < want_pri and bundle_practiced:
+                        picked += self._pick_from_pool(
+                            pri_full, want_pri - len(picked), request, uncovered_in_cat,
+                            chapter_usage, covered_knowledge, globally_selected_ids, sub_rng,
+                            extra_weights=bundle_wrong_w,
+                        )
+                    for q in picked:
+                        globally_covered_chapters.add(q.chapter)
+                    chosen_for_group += picked
+                    cat_pool = [q for q in cat_pool if q.id not in globally_selected_ids]
+
+                # 余下名额用新题补：排除已抽过的题(seen)，剔空则软重置回完整池。
+                # 此前联考完全无视 exclude_seen/historical_seen_question_ids，新题反复重复。
+                if bundle_seen:
+                    fresh = [q for q in cat_pool if q.id not in bundle_seen]
+                    if fresh:
+                        cat_pool = fresh
 
                 priority_pool = [
                     q for q in cat_pool
@@ -676,8 +723,12 @@ class PaperEngine:
         covered_knowledge: Counter,
         selected_ids: set[str],
         rng: random.Random,
+        extra_weights: dict[str, float] | None = None,
     ) -> list[QuestionItem]:
-        """从 pool 里按打分轮盘抽 needed 道（不重复），并更新章节/知识点计数。"""
+        """从 pool 里按打分轮盘抽 needed 道（不重复），并更新章节/知识点计数。
+
+        extra_weights: 按题号的额外权重乘子（错题按做错次数加权用），缺省 1.0。
+        """
         work = [q for q in pool if q.id not in selected_ids]
         chosen: list[QuestionItem] = []
         for _ in range(min(needed, len(work))):
@@ -692,7 +743,7 @@ class PaperEngine:
                     seen_knowledge=covered_knowledge,
                     chapter_weight=request.chapter_weights.get(
                         q.question_type.value, {}).get(q.chapter, 1.0),
-                )
+                ) * (extra_weights.get(q.id, 1.0) if extra_weights else 1.0)
                 for q in work
             ]
             idx = self._roulette_select(scores, rng)
@@ -719,7 +770,7 @@ class PaperEngine:
         """
         ratio = max(0.0, min(1.0, request.priority_ratio))
         pri_ids = request.priority_pool_ids
-        # seen 排除仅作用于"新题"；错题优先池永不排除(错题必须能重练)。
+        # seen 排除仅作用于"新题"；错题池不吃 seen，改走 priority_practiced_ids 轮换。
         seen = request.historical_seen_question_ids if request.exclude_seen else set()
 
         def _drop_seen(pool: list[QuestionItem]) -> list[QuestionItem]:
@@ -728,6 +779,21 @@ class PaperEngine:
                 return pool
             filtered = [q for q in pool if q.id not in seen]
             return filtered if filtered else pool
+
+        practiced = request.priority_practiced_ids
+
+        def _rotate(pool: list[QuestionItem]) -> list[QuestionItem]:
+            """错题轮换：优先本轮没练过的；全练过了则软重置回完整错题池。"""
+            if not practiced:
+                return pool
+            fresh = [q for q in pool if q.id not in practiced]
+            return fresh if fresh else pool
+
+        # 错题按做错次数加权：错 3 次的权重 3.0，错 1 次的 1.0（下限 1.0，缺省按 1 次）
+        wrong_w = {
+            qid: max(1.0, float(cnt))
+            for qid, cnt in request.priority_wrong_counts.items()
+        } or None
 
         if ratio <= 0.0 or not pri_ids:
             # 全部普通抽 → 整个 cat_pool 都是"新题",按 seen 过滤 + 软重置
@@ -740,12 +806,17 @@ class PaperEngine:
             return chosen
 
         want_pri = int(round(needed * ratio))
-        pri_pool = [q for q in cat_pool if q.id in pri_ids]
+        pri_pool_full = [q for q in cat_pool if q.id in pri_ids]
+        pri_pool = _rotate(pri_pool_full)     # 错题池按轮换过滤 + 软重置
         new_pool_full = [q for q in cat_pool if q.id not in pri_ids]
         new_pool = _drop_seen(new_pool_full)  # 新题池按 seen 过滤 + 软重置
 
         chosen: list[QuestionItem] = []
-        chosen += self._pick_from_pool(pri_pool, want_pri, request, unseen_chapters, chapter_usage, covered_knowledge, selected_ids, rng)
+        chosen += self._pick_from_pool(pri_pool, want_pri, request, unseen_chapters, chapter_usage, covered_knowledge, selected_ids, rng, extra_weights=wrong_w)
+        # 本轮未练错题不够 → 从完整错题池软重置补齐(允许本轮已练过的)
+        remaining_pri = want_pri - len(chosen)
+        if remaining_pri > 0 and practiced:
+            chosen += self._pick_from_pool(pri_pool_full, remaining_pri, request, unseen_chapters, chapter_usage, covered_knowledge, selected_ids, rng, extra_weights=wrong_w)
         # 剩余名额（含错题不足时的缺口）用新题补
         remaining = needed - len(chosen)
         chosen += self._pick_from_pool(new_pool, remaining, request, unseen_chapters, chapter_usage, covered_knowledge, selected_ids, rng)
@@ -753,8 +824,11 @@ class PaperEngine:
         remaining = needed - len(chosen)
         if remaining > 0 and seen:
             chosen += self._pick_from_pool(new_pool_full, remaining, request, unseen_chapters, chapter_usage, covered_knowledge, selected_ids, rng)
-        # 新题仍不够 → 回补错题(原有兜底)
+        # 新题仍不够 → 回补错题(原有兜底)：先本轮未练的，再退完整错题池
         remaining = needed - len(chosen)
         if remaining > 0:
-            chosen += self._pick_from_pool(pri_pool, remaining, request, unseen_chapters, chapter_usage, covered_knowledge, selected_ids, rng)
+            chosen += self._pick_from_pool(pri_pool, remaining, request, unseen_chapters, chapter_usage, covered_knowledge, selected_ids, rng, extra_weights=wrong_w)
+        remaining = needed - len(chosen)
+        if remaining > 0 and practiced:
+            chosen += self._pick_from_pool(pri_pool_full, remaining, request, unseen_chapters, chapter_usage, covered_knowledge, selected_ids, rng, extra_weights=wrong_w)
         return chosen

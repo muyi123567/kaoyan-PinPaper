@@ -545,6 +545,14 @@ with st.sidebar:
     url_1000_key = URL_1000_KEY.get(active_sub)
     url_1000_seen_key = URL_1000_SEEN_KEY.get(active_sub)
     canonical_1000 = loader.canonical_ids(book=BOOK_1000)
+    # 错题轮换账本位图参数(本轮已重练的错题),与 seen 的 n/zn/tn 同构但独立并存。
+    # 旧链接没有 r/zr/tr → 账本为空 → 等同"新一轮开始",向后兼容。
+    URL_ROT_KEY = {SubjectType.MATH_1: "r1", SubjectType.MATH_2: "r2", SubjectType.MATH_3: "r3"}
+    URL_ROT_ZT_KEY = {SubjectType.MATH_1: "zr1", SubjectType.MATH_2: "zr2", SubjectType.MATH_3: "zr3"}
+    URL_ROT_1K_KEY = {SubjectType.MATH_1: "tr1", SubjectType.MATH_2: "tr2", SubjectType.MATH_3: "tr3"}
+    url_rot_key = URL_ROT_KEY.get(active_sub)
+    url_rot_zt_key = URL_ROT_ZT_KEY.get(active_sub)
+    url_rot_1k_key = URL_ROT_1K_KEY.get(active_sub)
     # 试卷码(q1/q2/q3)按书分别锚定：每题记 (书籍, 书内下标)，故跨书试卷能完整还原。
     # 签名只覆盖某个码实际引用到的书 → 加第四本书不会让旧试卷链接失效。
     paper_book_canonicals = {
@@ -583,6 +591,15 @@ with st.sidebar:
             incoming_1k_seen = st.query_params.get(url_1000_seen_key) if url_1000_seen_key else None
             if incoming_1k_seen and canonical_1000:
                 state_mgr.apply_seen_url_code(incoming_1k_seen, canonical_1000)
+            # 恢复错题轮换账本(本轮已重练的错题),三本书各自锚定,同为并集合并
+            for _rk, _rcanon in (
+                (url_rot_key, canonical_ids),
+                (url_rot_zt_key, zhenti_canonical),
+                (url_rot_1k_key, canonical_1000),
+            ):
+                _incoming_rot = st.query_params.get(_rk) if _rk else None
+                if _incoming_rot and _rcanon:
+                    state_mgr.apply_rotation_url_code(_incoming_rot, _rcanon)
 
     # URL 试卷码：记住上次生成的是哪几道题（不含组卷配置），做完后跨设备查阅答案。
     # 每科目一个参数键 q1/q2/q3。当右侧无当前试卷时（首次进入 / 切科目回来）从 URL 恢复。
@@ -816,7 +833,9 @@ with tab_paper_hub:
             "🚫 避免重复抽题（抽过的新题不再抽）",
             value=True,
             key=f"p1_exclude_seen_{current_subject.value}",
-            help="开启后组卷会跳过你之前抽到过的新题；抽完全书后自动重新允许。错题重练不受影响。",
+            help="开启后组卷会跳过你之前抽到过的新题；抽完全书后自动重新允许。"
+                 "错题仍会重练，但改为**轮换**：优先抽本轮还没练过的错题，全部练过一遍后自动开新一轮，"
+                 "轮内错得越多的题越容易被抽中。",
         )
         _dist_all = get_chapter_dist()
         _has_dist = current_subject.value in _dist_all
@@ -1001,6 +1020,9 @@ with tab_paper_hub:
                 priority_pool_ids=wrong_id_set,
                 priority_ratio=effective_ratio,
                 exclude_seen=exclude_seen,
+                # 错题轮换 + 按做错次数加权：保证每道错题一轮内都轮到，且错得多的更常出现
+                priority_practiced_ids=set(state_mgr.wrong_rotation_ids) if exclude_seen else set(),
+                priority_wrong_counts=state_mgr.get_wrong_counts(wrong_id_set),
                 chapter_weights=chapter_weights,
             )
             if current_mode == PaperMode.BUNDLE_3_PAPERS:
@@ -1010,12 +1032,22 @@ with tab_paper_hub:
                 for p in bundle.papers:
                     state_mgr.record_paper_generation(p.questions)
                 state_mgr.set_last_papers([[q.id for q in p.questions] for p in bundle.papers])
+                _rotated = state_mgr.record_wrong_practice(
+                    [q.id for p in bundle.papers for q in p.questions]
+                )
             else:
                 paper = engine.generate_single_paper(req)
                 st.session_state.current_paper_p1 = paper
                 st.session_state.current_bundle_p1 = None
                 state_mgr.record_paper_generation(paper.questions)
                 state_mgr.set_last_papers([[q.id for q in paper.questions]])
+                _rotated = state_mgr.record_wrong_practice([q.id for q in paper.questions])
+            if _rotated:
+                st.session_state["_wrong_rotation_reset"] = current_subject.value
+
+    # 错题轮换满一轮的提示：告诉用户所有错题都练过一遍了，下一卷起重新开始轮
+    if st.session_state.pop("_wrong_rotation_reset", None) == current_subject.value:
+        st.success("🎉 本轮错题已全部重练过一遍！账本已清空，下一份卷子开始新一轮轮换。")
 
     # 渲染当前生成的试卷
     active_paper: PaperItem | None = st.session_state.get("current_paper_p1")
@@ -1948,6 +1980,16 @@ if url_data_key and current_subject != SubjectType.CUSTOM:
         k_seen_code = state_mgr.seen_to_url_code(canonical_1000)
         if st.query_params.get(url_1000_seen_key) != k_seen_code:
             st.query_params[url_1000_seen_key] = k_seen_code
+    # 错题轮换账本写回 r/zr/tr(每本书一个),让手机与电脑共享同一轮进度
+    for _rk, _rcanon in (
+        (url_rot_key, canonical_ids),
+        (url_rot_zt_key, zhenti_canonical),
+        (url_rot_1k_key, canonical_1000),
+    ):
+        if _rk and _rcanon:
+            _rot_code = state_mgr.rotation_to_url_code(_rcanon)
+            if st.query_params.get(_rk) != _rot_code:
+                st.query_params[_rk] = _rot_code
 
 # 试卷码同步：把当前生成的试卷题号写回网址（q1/q2/q3），做完后可凭链接查阅答案
 if paper_url_key and current_subject != SubjectType.CUSTOM:
