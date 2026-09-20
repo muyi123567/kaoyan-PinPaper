@@ -1075,3 +1075,125 @@ body.theme-light .nav-tabs {
   from { transform: translateX(50px); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
 }
+
+/* =========================================================================
+   题库概况 pill（答案覆盖率等真实统计）
+   ========================================================================= */
+.bank-stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.25));
+  font-size: 12px;
+  color: var(--text-muted, #94a3b8);
+  white-space: nowrap;
+  max-width: 46vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* =========================================================================
+   可访问性：键盘焦点可见（默认 outline 被 reset 掉后必须补回来）
+   ========================================================================= */
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+}
+
+/* =========================================================================
+   响应式：平板
+   ========================================================================= */
+@media (max-width: 1100px) {
+  .app-navbar {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 12px 16px;
+  }
+  .nav-tabs {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+  }
+  .control-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .mode-card-grid {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) !important;
+  }
+  .bank-stat-pill {
+    max-width: 100%;
+  }
+}
+
+/* =========================================================================
+   响应式：手机（组卷/标错/雷达三视图在窄屏下堆叠，表格可横滑）
+   ========================================================================= */
+@media (max-width: 720px) {
+  .app-navbar {
+    padding: 10px 12px;
+  }
+  .brand-subtitle {
+    display: none;
+  }
+  .brand-title {
+    font-size: 15px;
+  }
+  .nav-tab {
+    padding: 8px 12px;
+    font-size: 12.5px;
+    white-space: nowrap;
+  }
+  .workspace-container {
+    padding: 12px !important;
+  }
+  .glass-panel {
+    padding: 14px !important;
+  }
+  .panel-title {
+    font-size: 16px;
+  }
+  .slider-row {
+    flex-direction: column;
+    align-items: flex-start !important;
+    gap: 6px;
+  }
+  .slider-row input[type="range"] {
+    width: 100%;
+  }
+  .subject-select-pill,
+  .app-select {
+    max-width: 100%;
+  }
+  table, .radar-table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .toast {
+    left: 12px;
+    right: 12px;
+    max-width: none;
+  }
+  .question-card {
+    padding: 12px !important;
+  }
+  .options-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* 尊重系统「减少动态效果」设置 */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

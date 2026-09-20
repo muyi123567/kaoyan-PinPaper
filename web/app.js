@@ -86,6 +86,35 @@ async function initApp() {
   await generatePaper();
 }
 
+// 顶部题库概况：各书题数 + 答案覆盖率
+function updateBankStats(data) {
+  const pill = document.getElementById('bankStatText');
+  if (!pill) return;
+  const books = data.books || [];
+  if (!books.length) {
+    pill.textContent = `${data.totalQuestions} 题`;
+    return;
+  }
+  const parts = books.map(b => `${b.name.replace(/[《》]/g, '')} ${b.count}`);
+  const cov = typeof data.answerCoverage === 'number' ? data.answerCoverage : 0;
+  pill.textContent = `共 ${data.totalQuestions} 题（${parts.join(' + ')}）· 答案 ${cov}%`;
+}
+
+// 科目下拉：把真实题数写进选项文本
+function updateSubjectOptions(data) {
+  const sel = document.getElementById('globalSubjectSelector');
+  if (!sel || !data) return;
+  const current = sel.value;
+  sel.dataset.stats = JSON.stringify({
+    [data.currentSubject]: data.totalQuestions
+  });
+  Array.from(sel.options).forEach(opt => {
+    const n = sel.dataset.stats && JSON.parse(sel.dataset.stats)[opt.value];
+    if (n) opt.textContent = `📐 ${opt.value} (${n}题)`;
+  });
+  sel.value = current;
+}
+
 async function loadInitData() {
   try {
     const res = await fetch(`/api/init?subject=${encodeURIComponent(state.currentSubject)}`);
@@ -99,6 +128,9 @@ async function loadInitData() {
     if (elements.currentSubjectBadge) {
       elements.currentSubjectBadge.textContent = `当前科目: ${data.currentSubject} (${data.totalChapters}章·${data.totalQuestions}题)`;
     }
+
+    // 题库构成与答案覆盖率：直接来自后端真实统计，不再写死
+    updateBankStats(data);
     
     // Populate Marker Chapters Dropdown
     if (elements.markerChapterSelect) {
@@ -117,6 +149,7 @@ async function loadInitData() {
     
     // Update wrong pool metrics
     await updateWrongPoolStats();
+    updateSubjectOptions(data);
   } catch (err) {
     console.error('Failed to init data:', err);
     showToast('❌ 加载题库数据失败，请刷新重试');
@@ -145,12 +178,21 @@ function setupEventListeners() {
     });
   });
 
-  // Theme Toggle
+  // Theme Toggle（含持久化：刷新后保持上次选择）
   if (elements.themeToggleBtn) {
+    try {
+      if (localStorage.getItem('pinpaper-theme') === 'light') {
+        document.body.classList.add('theme-light');
+        elements.themeToggleBtn.textContent = '☀️';
+      }
+    } catch (e) {}
     elements.themeToggleBtn.addEventListener('click', () => {
       document.body.classList.toggle('theme-light');
       const isLight = document.body.classList.contains('theme-light');
       elements.themeToggleBtn.textContent = isLight ? '☀️' : '🌙';
+      try {
+        localStorage.setItem('pinpaper-theme', isLight ? 'light' : 'dark');
+      } catch (e) {}
     });
   }
 

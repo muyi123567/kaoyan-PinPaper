@@ -5,21 +5,33 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>考研数学《880》智能拼好卷 & 错题标练系统</title>
   
-  <!-- Typography -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Noto+Serif+SC:wght@600;700;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  
-  <!-- KaTeX for Lightning-Fast Formula Rendering -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <!-- Typography：不再外链 Google Fonts（国内网络下经常超时、首屏白屏），
+       改用系统字体栈，中文优先 PingFang / 微软雅黑 -->
+  <meta name="color-scheme" content="dark light">
 
-  <!-- Marked.js for Markdown -->
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- KaTeX：本地优先（assets/katex 随仓库分发，离线可用），本地缺失才回退 CDN -->
+  <link rel="stylesheet" href="/assets/katex/katex.min.css"
+        onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css'">
+  <script defer src="/assets/katex/katex.min.js"
+          onerror="var s=document.createElement('script');s.defer=true;s.src='https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js';document.head.appendChild(s)"></script>
+  <script defer src="/assets/katex/auto-render.min.js"
+          onerror="var s=document.createElement('script');s.defer=true;s.src='https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js';document.head.appendChild(s)"></script>
+
+  <!-- Marked.js：本地优先，缺失回退 CDN -->
+  <script src="/assets/vendor/marked.min.js"
+          onerror="document.write('<script src=\"https://cdn.jsdelivr.net/npm/marked/marked.min.js\"><\/script>')"></script>
 
   <!-- Stylesheet -->
   <link rel="stylesheet" href="style.css">
+  <script>
+    // 主题持久化：在渲染前套用，避免深色/浅色闪屏
+    (function () {
+      try {
+        var saved = localStorage.getItem('pinpaper-theme');
+        if (saved === 'light') document.documentElement.classList.add('theme-preload-light');
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body class="theme-dark">
   <div id="app" class="app-layout">
@@ -50,13 +62,17 @@
       </nav>
 
       <div class="nav-actions">
+        <!-- 选项由 /api/init 的真实统计填充，不再写死题数（题库增删会立刻反映） -->
         <select id="globalSubjectSelector" class="subject-select-pill">
-          <option value="数学一">📐 数学一 (23章·1121题)</option>
-          <option value="数学二">📐 数学二 (12章·929题)</option>
-          <option value="数学三">📐 数学三 (21章·1028题)</option>
+          <option value="数学一">📐 数学一</option>
+          <option value="数学二">📐 数学二</option>
+          <option value="数学三">📐 数学三</option>
         </select>
         <div class="wrong-badge-pill" id="globalWrongCounter">
-          <span class="dot"></span> 880 错题本: <strong id="headerWrongCount">0</strong> 题
+          <span class="dot"></span> 错题本: <strong id="headerWrongCount">0</strong> 题
+        </div>
+        <div class="bank-stat-pill" id="bankStatPill" title="题库构成与答案覆盖率">
+          <span id="bankStatText">题库加载中…</span>
         </div>
         <button class="theme-toggle-btn" id="themeToggleBtn" title="切换深色/浅色主题">
           🌙
