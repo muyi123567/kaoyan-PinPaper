@@ -9,6 +9,12 @@
        改用系统字体栈，中文优先 PingFang / 微软雅黑 -->
   <meta name="color-scheme" content="dark light">
 
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#2563eb">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+
   <!-- KaTeX：本地优先（assets/katex 随仓库分发，离线可用），本地缺失才回退 CDN -->
   <link rel="stylesheet" href="/assets/katex/katex.min.css"
         onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css'">
@@ -123,6 +129,7 @@
         <button class="exam-btn" id="examPrevBtn">← 上一题</button>
         <button class="exam-btn" id="examFlagBtn">⚑ 标记本题</button>
         <button class="exam-btn" id="examNextBtn">下一题 →</button>
+        <span class="exam-kbd-hint">键盘：A-D／1-4 选选项 · ← → 翻页 · M 标记 · F 全屏 · Ctrl+Enter 交卷</span>
       </footer>
     </div>
 
@@ -410,5 +417,24 @@
 
   <!-- Main Application Script -->
   <script src="app.js"></script>
+
+  <!-- PWA：注册 Service Worker，装到桌面/手机后可离线打开 -->
+  <script>
+    if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js').catch(() => {});
+      });
+      // 网络状态提示：断网时给一次 toast，恢复时再提示一次
+      let wasOffline = !navigator.onLine;
+      window.addEventListener('offline', () => {
+        wasOffline = true;
+        if (typeof showToast === 'function') showToast('📴 已断网，已缓存的页面仍可继续使用');
+      });
+      window.addEventListener('online', () => {
+        if (wasOffline && typeof showToast === 'function') showToast('🌐 网络已恢复');
+        wasOffline = false;
+      });
+    }
+  </script>
 </body>
 </html>

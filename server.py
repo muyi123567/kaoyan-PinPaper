@@ -547,6 +547,7 @@ class AppAPIHandler(SimpleHTTPRequestHandler):
 
             results: list[dict] = []
             wrong_ids: list[str] = []
+            correct_ids: list[str] = []
             graded = 0
             correct = 0
             for qid, user_answer in answers.items():
@@ -568,6 +569,7 @@ class AppAPIHandler(SimpleHTTPRequestHandler):
                     if _norm_answer(std) == _norm_answer(ua):
                         status = "correct"
                         correct += 1
+                        correct_ids.append(str(qid))
                     else:
                         status = "wrong"
                         wrong_ids.append(str(qid))
@@ -581,9 +583,16 @@ class AppAPIHandler(SimpleHTTPRequestHandler):
 
             # 错题反哺：答错/未答的题自动进错题本（走既有账本，与手动标错等价）
             marked = 0
-            if wrong_ids:
-                with STATE_LOCK:
+            mastered = 0
+            with STATE_LOCK:
+                if wrong_ids:
                     marked = state_mgr.batch_mark_wrong(wrong_ids)
+                # 错题闭环：重练答对的题自动移出活跃待练池，不再反复出现在错题优先卷里
+                if correct_ids:
+                    mastered = state_mgr.batch_mark_solved_correctly(correct_ids)
+                # 本轮重练登记进轮换乘本（只登记本来就在错题本里的题号）
+                if wrong_ids or correct_ids:
+                    state_mgr.record_wrong_practice(list(wrong_ids) + list(correct_ids))
 
             self._send_json({
                 "status": "ok",
@@ -593,6 +602,7 @@ class AppAPIHandler(SimpleHTTPRequestHandler):
                 "score": round(correct * 100.0 / graded, 1) if graded else 0.0,
                 "ungraded": sum(1 for r in results if r["status"] == "ungraded"),
                 "markedWrong": marked,
+                "masteredCount": mastered,
                 "results": results,
             })
             return
@@ -699,6 +709,7 @@ class AppAPIHandler(SimpleHTTPRequestHandler):
                 "coreKnowledge": q.core_knowledge,
                 "pitfallAnalysis": q.pitfall_analysis,
                 "tags": q.tags,
+                "book": getattr(q, "book", "") or "",   # 来自哪本题库，便于按书回填/统计
                 "isWrong": state_mgr.is_wrong_marked(q.id),
             }
 

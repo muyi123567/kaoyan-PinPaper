@@ -211,6 +211,8 @@ function openExam(paper, minutes = 180) {
   exam.open = true;
 
   renderExamSheet();
+  // 宽屏（平板横屏 / 桌面）默认展开答题卡双栏；窄屏保持浮层，不挤占题面
+  examEl.sheet().hidden = !window.matchMedia('(min-width: 1024px)').matches;
   bindExamInputs();
   goExamPage(0, true);
   startExamTimer();
@@ -387,7 +389,8 @@ function renderExamResult(data) {
         <span style="opacity:.75">未判 ${data.ungraded} 题（题库暂无答案）</span>
       </div>
       <div>
-        已自动加入错题本：<strong>${data.markedWrong ?? 0}</strong> 题
+        已自动加入错题本：<strong>${data.markedWrong ?? 0}</strong> 题<br/>
+        <span style="opacity:.75">重练答对、已移出待练池：<strong>${data.masteredCount ?? 0}</strong> 题</span>
       </div>
     </div>
     ${items}
@@ -426,12 +429,35 @@ function setupExamControls() {
     const cell = examEl.sheetGrid().querySelector(`[data-qid="${q.id}"]`);
     if (cell) cell.classList.toggle('flag', exam.flags.has(q.id));
   });
-  // 键盘：← → 翻页，F 全屏，Esc 已在浏览器层面退出全屏
+  // 键盘流：← → 翻页；A-D / 1-4 选选项；Ctrl+Enter 交卷；F 全屏；M 标记本题
   document.addEventListener('keydown', (e) => {
-    if (!exam.open || !examEl.resultOverlay().hidden) return;
-    if (e.key === 'ArrowLeft') goExamPage(exam.index - 1);
-    else if (e.key === 'ArrowRight') goExamPage(exam.index + 1);
-    else if (e.key === 'f' || e.key === 'F') document.getElementById('examFullBtn')?.click();
+    if (!exam.open) return;
+    if (!examEl.resultOverlay().hidden) {
+      if (e.key === 'Escape') examEl.resultOverlay().hidden = true;
+      return;
+    }
+    const t = e.target;
+    const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      document.getElementById('examSubmitBtn')?.click();
+      return;
+    }
+    if (typing) return;   // 正在填答案时不劫持字母/数字键
+
+    if (e.key === 'ArrowLeft') { goExamPage(exam.index - 1); return; }
+    if (e.key === 'ArrowRight') { goExamPage(exam.index + 1); return; }
+
+    if (/^[a-dA-D1-4]$/.test(e.key)) {
+      const key = /[1-4]/.test(e.key) ? String.fromCharCode(64 + Number(e.key)) : e.key.toUpperCase();
+      const page = examEl.track().children[exam.index];
+      const opt = page && page.querySelector(`.exam-opt[data-key="${key}"]`);
+      if (opt) { opt.click(); e.preventDefault(); }
+      return;
+    }
+    if (e.key === 'f' || e.key === 'F') document.getElementById('examFullBtn')?.click();
+    else if (e.key === 'm' || e.key === 'M') document.getElementById('examFlagBtn')?.click();
   });
   // 横滑一页后同步当前题号（用于答题卡高亮与进度）
   const track = examEl.track();
@@ -441,7 +467,9 @@ function setupExamControls() {
       clearTimeout(t);
       t = setTimeout(() => {
         const w = track.clientWidth || 1;
-        goExamPage(Math.round(track.scrollLeft / w));
+        const idx = Math.round(track.scrollLeft / w);
+        // 只在确实翻到别的页时才回写，否则会和平滑滚动互相触发、来回抖
+        if (idx !== exam.index) goExamPage(idx);
       }, 90);
     });
   }

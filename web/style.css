@@ -1324,9 +1324,15 @@ a:focus-visible {
 .exam-sheet-legend .dot.flag { background: #f59e0b; }
 
 .exam-foot {
-  display: flex; justify-content: center; gap: 12px;
+  display: flex; justify-content: center; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 10px 16px; border-top: 1px solid rgba(148, 163, 184, 0.22);
   background: var(--bg-panel);
+}
+.exam-kbd-hint {
+  font-size: 12px; opacity: .55; margin-left: 4px;
+}
+@media (max-width: 720px) {
+  .exam-kbd-hint { display: none; }
 }
 
 /* 判卷结果 */

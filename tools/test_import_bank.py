@@ -81,7 +81,6 @@ def test_csv_to_items(tmp_path=None):
     assert order > max(s.order for s in load_books(base)
                        if s.key in ("880", "真题", "张宇1000题")), \
         "新书 order 必须大于内置三本，否则旧链接失效"
-    return True
 
 
 def test_bank_is_loadable_by_engine(tmp_path=None):
@@ -109,7 +108,6 @@ def test_bank_is_loadable_by_engine(tmp_path=None):
     mine = [q for q in questions if q.book == "引擎测试"]
     assert len(mine) == 3, f"引擎应读到 3 题，实际 {len(mine)}"
     assert {q.question_type.value for q in mine} == {"选择题", "填空题", "解答题"}
-    return True
 
 
 if __name__ == "__main__":
