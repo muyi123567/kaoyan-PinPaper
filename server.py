@@ -66,6 +66,27 @@ ai_tutor = AITutor()
 STATE_LOCK = threading.RLock()
 
 
+def reload_banks() -> dict[str, int]:
+    """重新加载全部题库（答案包 / 新书目变更後调用，无需重启服务）。"""
+    counts: dict[str, int] = {}
+    with STATE_LOCK:
+        for sub, l in loaders.items():
+            l.questions_by_id = {}
+            l.chapters = []
+            l._is_loaded = False
+            counts[sub.value] = len(l.load())
+    load_chapter_dist.cache_clear()
+    return counts
+
+
+def _norm_answer(s: str) -> str:
+    """答案归一化后比较：去空白与常见标点，大写；纯字母多选（如 AC / CA）排序后比较。"""
+    t = re.sub(r"[\s，,、（）()\[\]{}<>。.;；:：'\"`]", "", str(s or "")).upper()
+    if t and all(c in "ABCDEFG" for c in t):
+        return "".join(sorted(t))
+    return t
+
+
 def parse_subject(subject_str: str) -> SubjectType:
     if "二" in subject_str or subject_str == "数学二":
         return SubjectType.MATH_2
@@ -506,6 +527,76 @@ class AppAPIHandler(SimpleHTTPRequestHandler):
             self._send_json({"status": "ok", "path": f"试卷库/{paper_id}_全真模考.html"})
             return
 
+        # API: 热重载题库（导入答案包 / 新增题库后调用，无需重启服务）
+        if path == "/api/reload":
+            counts = reload_banks()
+            self._send_json({"status": "ok", "counts": counts,
+                             "answerCoverage": round(
+                                 sum(1 for l in loaders.values() for q in l.questions_by_id.values()
+                                     if q.answer.strip()) /
+                                 max(1, sum(len(l.questions_by_id) for l in loaders.values())) * 100, 2)})
+            return
+
+        # API: 交卷判分（考场模式）
+        if path == "/api/submit-answers":
+            sub_str = payload.get("subject", "数学一")
+            cur_sub = parse_subject(sub_str)
+            answers = payload.get("answers", {}) or {}
+            loader = loaders[cur_sub]
+            loader.load()
+
+            results: list[dict] = []
+            wrong_ids: list[str] = []
+            graded = 0
+            correct = 0
+            for qid, user_answer in answers.items():
+                q = loader.questions_by_id.get(str(qid))
+                std = ""
+                solution = ""
+                if q is not None:
+                    std = (q.answer or "").strip()
+                    solution = q.solution or ""
+                ua = "" if user_answer is None else str(user_answer).strip()
+                if not std:
+                    status = "ungraded"          # 题库暂无标准答案，不判对错
+                elif not ua:
+                    status = "blank"             # 未作答，按错处理但不计分噪声
+                    graded += 1
+                    wrong_ids.append(str(qid))
+                else:
+                    graded += 1
+                    if _norm_answer(std) == _norm_answer(ua):
+                        status = "correct"
+                        correct += 1
+                    else:
+                        status = "wrong"
+                        wrong_ids.append(str(qid))
+                results.append({
+                    "id": str(qid),
+                    "userAnswer": ua,
+                    "standardAnswer": std,
+                    "solution": solution,
+                    "status": status,
+                })
+
+            # 错题反哺：答错/未答的题自动进错题本（走既有账本，与手动标错等价）
+            marked = 0
+            if wrong_ids:
+                with STATE_LOCK:
+                    marked = state_mgr.batch_mark_wrong(wrong_ids)
+
+            self._send_json({
+                "status": "ok",
+                "total": len(results),
+                "graded": graded,
+                "correct": correct,
+                "score": round(correct * 100.0 / graded, 1) if graded else 0.0,
+                "ungraded": sum(1 for r in results if r["status"] == "ungraded"),
+                "markedWrong": marked,
+                "results": results,
+            })
+            return
+
         # API: 设置共享授权（决定是否允许导出/推送贡献包）
         if path == "/api/solutions/consent":
             consent = contribution_hub.write_consent(
@@ -542,6 +633,9 @@ class AppAPIHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"status": "error", "message": str(e)}, 400)
                 return
+            # 答案已落盘 → 立刻热重载，否则本次进程内判分还是拿不到新答案
+            if res.get("accepted"):
+                res["reloaded"] = reload_banks()
             res["status"] = "ok"
             self._send_json(res)
             return
